@@ -6,9 +6,11 @@ import os
 from scipy.sparse import diags, lil_matrix
 from scipy.sparse.linalg import spsolve
 
+
 # Створюємо папку для збереження результатів
 if not os.path.exists("results"):
     os.makedirs("results")
+
 
 # Функція 1: Ініціалізація сітки
 def initialize_grid():
@@ -17,24 +19,29 @@ def initialize_grid():
     X, Z = np.meshgrid(x, z)
     return x, z, X, Z
 
+
 # Функція 2: Ініціалізація концентрації та швидкості
 def initialize_conditions(x, z):
-    channel_left = -0.1 - (2 - 0.1) / 6 * (6 - z)
-    channel_right = 0.1 + (2 - 0.1) / 6 * (6 - z)
-    
+    channel_left = np.where(z >= 3, -0.1, -0.1 - (2 - 0.1) / 3 * (3 - z))
+    channel_right = np.where(z >= 3, 0.1, 0.1 + (2 - 0.1) / 3 * (3 - z))
+
     q = np.zeros((config.nx, config.nz))
     v_z = np.zeros((config.nx, config.nz))
-    
+
+    # Початкова концентрація тільки на поверхні (верхня межа)
+    q[:, -1] = config.q_top  
+
     for j in range(config.nz):
         z_val = z[j]
-        v_z_at_z = -0.02 + (0.02 - 0.001) / 6 * (6 - z_val)
         x_left = -0.1 - (2 - 0.1) / 6 * (6 - z_val)
         x_right = 0.1 + (2 - 0.1) / 6 * (6 - z_val)
         channel_indices = np.where((x >= x_left) & (x <= x_right))[0]
+
         for i in channel_indices:
-            v_z[i, j] = v_z_at_z
-    
+            v_z[i, j] = config.v_z_channel + (0.02 - 0.001) / 6 * (6 - z_val)
+
     return q, v_z, channel_left, channel_right
+
 
 # Функція 3: Побудова матриць для неявної схеми
 def build_matrices(q, v_z):
@@ -77,7 +84,7 @@ def build_matrices(q, v_z):
     return A, B
 
 # Функція 4: Оновлення концентрації (неявна схема)
-def update_concentration(q, v_z):
+def update_concentration(q, v_z, x, z, channel_left, channel_right):
     A, B = build_matrices(q, v_z)
     
     # Розгортаємо q у вектор
@@ -92,20 +99,42 @@ def update_concentration(q, v_z):
     # Перетворюємо назад у матрицю
     q_new = q_new_flat.reshape((config.nx, config.nz))
     
-    # Обмеження значень
-    q_new = np.where(q_new < 0, 0, q_new)
-    q_new = np.where(q_new > 1e3, 1e3, q_new)
+    # Обмеження значень поза каналом
+    channel_mask = get_channel_mask(x, z, channel_left, channel_right)
+    q_new = np.where(~channel_mask, np.clip(q_new, 0, 1e3), 0.0)  # В каналі - 0
     
     return q_new
 
+
+# Додаємо нову функцію для визначення маски каналу
+def get_channel_mask(x, z, channel_left, channel_right):
+    """Повертає маску, де True - точки, що належать каналу."""
+    mask = np.zeros((len(x), len(z)), dtype=bool)
+    for j in range(len(z)):
+        x_left = channel_left[j]
+        x_right = channel_right[j]
+        mask[:, j] = (x >= x_left) & (x <= x_right)
+    return mask
+
+
 # Функція 5: Застосування граничних умов
-def apply_boundary_conditions(q):
+def apply_boundary_conditions(q, x, z, channel_left, channel_right):
     q_new = q.copy()
-    q_new[:, -1] = config.q_top  # Верхня межа
+    
+    # Визначаємо маску каналу
+    channel_mask = get_channel_mask(x, z, channel_left, channel_right)
+    
+    # Граничні умови для всієї області
+    q_new[:, -1] = config.q_top  # Верхня межа (поверхня)
     q_new[:, 0] = q_new[:, 1]    # Нижня межа: ∂q/∂z = 0
     q_new[0, :] = q_new[1, :]    # Ліва межа: ∂q/∂x = 0
     q_new[-1, :] = q_new[-2, :]  # Права межа: ∂q/∂x = 0
+    
+    # Обнуляємо концентрацію в каналі (або фіксуємо на малому рівні)
+    q_new[channel_mask] = 0.0  # Або config.q_top, якщо потрібна мала концентрація
+    
     return q_new
+
 
 # Функція 6: Перевірка умов зупинки
 def check_stopping_condition(q, time):
@@ -120,32 +149,26 @@ def check_stopping_condition(q, time):
         print(f"Час: {time / (3600 * 24):.2f} днів, Мінімальна концентрація: {min_q:.4f} кг/м³")
     return False
 
+
 # Функція 7: Візуалізація з межами областей і збереженням
 def visualize_results_with_grid(X, Z, q, time, channel_left, channel_right, z, title="Концентрація забрудника"):
     plt.figure(figsize=(8, 6))
     plt.contourf(X.T, Z.T, q, levels=50, cmap='jet', alpha=0.8)
     plt.colorbar(label='Концентрація (кг/м³)')
-    
-    # Позначення меж каналу (конус)
-    plt.plot(channel_left, z, color='red', linestyle='--', linewidth=1.5, label='Межі каналу')
-    plt.plot(channel_right, z, color='red', linestyle='--', linewidth=1.5)
-    
-    # Позначення ізольованих меж
-    plt.axvline(x=-4, color='blue', linestyle='-', linewidth=1.5, label='Ізольовані межі')
-    plt.axvline(x=4, color='blue', linestyle='-', linewidth=1.5)
-    plt.axhline(y=0, color='blue', linestyle='-', linewidth=1.5)
-    plt.axhline(y=6, color='blue', linestyle='-', linewidth=1.5)
-    
+
+    # Межі каналу
+    plt.plot(channel_left, z, 'r--', linewidth=1.5, label='Межі каналу')
+    plt.plot(channel_right, z, 'r--', linewidth=1.5)
+
     plt.title(f'{title} через {time / (3600 * 24):.2f} днів')
     plt.xlabel('x (м)')
     plt.ylabel('z (м)')
     plt.legend()
     plt.gca().set_aspect('equal', adjustable='box')
-    
-    filename = f"results/concentration_{time / (3600 * 24):.2f}_days.png"
-    plt.savefig(filename, dpi=300, bbox_inches='tight')
-    print(f"Зображення збережено як {filename}")
+
+    plt.savefig(f"results/concentration_{time / (3600 * 24):.2f}_days.png", dpi=300, bbox_inches='tight')
     plt.show()
+
 
 # Основна функція моделювання
 def run_simulation():
@@ -158,14 +181,14 @@ def run_simulation():
     time = 0
     
     while time < config.max_time:
-        q_new = update_concentration(q, v_z)
-        q_new = apply_boundary_conditions(q_new)
+        q_new = update_concentration(q, v_z, x, z, channel_left, channel_right)
+        q_new = apply_boundary_conditions(q_new, x, z, channel_left, channel_right)
         q = q_new
         time += config.dt
         
         for snapshot_time in snapshot_times:
             if not snapshots_taken[snapshot_time] and abs(time - snapshot_time) < config.dt:
-                visualize_results_with_grid(X, Z, q, time, channel_left, channel_right, z, title="Концентрація забрудника (проміжний етап)")
+                visualize_results_with_grid(X, Z, q, time, channel_left, channel_right, z)
                 snapshots_taken[snapshot_time] = True
         
         if check_stopping_condition(q, time):
