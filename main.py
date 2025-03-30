@@ -1,16 +1,20 @@
 # main.py
+# import numpyTimestep: 1157/1157 [00:00<00:00, 12327.79it/s] numpy
 import numpy as np
 import matplotlib.pyplot as plt
 import config
 import os
 from scipy.sparse import diags, lil_matrix
 from scipy.sparse.linalg import spsolve
-
+from numba import jit
+import time  # Додано для вимірювання часу (опціонально)
 
 # Створюємо папку для збереження результатів
 if not os.path.exists("results"):
     os.makedirs("results")
 
+# Увімкнення інтерактивного режиму для matplotlib
+plt.ion()
 
 # Функція 1: Ініціалізація сітки
 def initialize_grid():
@@ -18,7 +22,6 @@ def initialize_grid():
     z = np.linspace(0, 6, config.nz)
     X, Z = np.meshgrid(x, z)
     return x, z, X, Z
-
 
 # Функція 2: Ініціалізація концентрації та швидкості
 def initialize_conditions(x, z):
@@ -28,7 +31,6 @@ def initialize_conditions(x, z):
     q = np.zeros((config.nx, config.nz))
     v_z = np.zeros((config.nx, config.nz))
 
-    # Початкова концентрація тільки на поверхні (верхня межа)
     q[:, -1] = config.q_top  
 
     for j in range(config.nz):
@@ -42,26 +44,22 @@ def initialize_conditions(x, z):
 
     return q, v_z, channel_left, channel_right
 
-
 # Функція 3: Побудова матриць для неявної схеми
 def build_matrices(q, v_z):
     N = config.nx * config.nz
-    A = lil_matrix((N, N))  # Матриця для неявної частини
-    B = lil_matrix((N, N))  # Матриця для явної частини
+    A = lil_matrix((N, N))
+    B = lil_matrix((N, N))
     
     alpha_x = config.D * config.dt / (2 * config.dx**2)
     alpha_z = config.D * config.dt / (2 * config.dz**2)
-    beta_z = config.dt / (4 * config.dz)  # Для адвекції
+    beta_z = config.dt / (4 * config.dz)
     
     for j in range(config.nz):
         for i in range(config.nx):
-            idx = i + j * config.nx  # Індекс у розгорнутому векторі
-            
-            # Діагональні елементи
+            idx = i + j * config.nx
             A[idx, idx] = 1 + 2 * alpha_x + 2 * alpha_z
             B[idx, idx] = 1 - 2 * alpha_x - 2 * alpha_z
             
-            # Елементи для дифузії по x
             if i > 0:
                 A[idx, idx - 1] = -alpha_x
                 B[idx, idx - 1] = alpha_x
@@ -69,7 +67,6 @@ def build_matrices(q, v_z):
                 A[idx, idx + 1] = -alpha_x
                 B[idx, idx + 1] = alpha_x
             
-            # Елементи для дифузії та адвекції по z
             if j > 0:
                 A[idx, idx - config.nx] = -alpha_z + beta_z * v_z[i, j]
                 B[idx, idx - config.nx] = alpha_z - beta_z * v_z[i, j]
@@ -77,7 +74,6 @@ def build_matrices(q, v_z):
                 A[idx, idx + config.nx] = -alpha_z - beta_z * v_z[i, j]
                 B[idx, idx + config.nx] = alpha_z + beta_z * v_z[i, j]
     
-    # Перетворюємо в формат CSR для швидкого розв’язання
     A = A.tocsr()
     B = B.tocsr()
     
@@ -86,29 +82,16 @@ def build_matrices(q, v_z):
 # Функція 4: Оновлення концентрації (неявна схема)
 def update_concentration(q, v_z, x, z, channel_left, channel_right):
     A, B = build_matrices(q, v_z)
-    
-    # Розгортаємо q у вектор
     q_flat = q.flatten()
-    
-    # Обчислюємо праву частину
     rhs = B @ q_flat
-    
-    # Розв’язуємо систему A * q_new = rhs
     q_new_flat = spsolve(A, rhs)
-    
-    # Перетворюємо назад у матрицю
     q_new = q_new_flat.reshape((config.nx, config.nz))
-    
-    # Обмеження значень поза каналом
     channel_mask = get_channel_mask(x, z, channel_left, channel_right)
-    q_new = np.where(~channel_mask, np.clip(q_new, 0, 1e3), 0.0)  # В каналі - 0
-    
+    q_new = np.where(~channel_mask, np.clip(q_new, 0, 1e3), 0.0)
     return q_new
 
-
-# Додаємо нову функцію для визначення маски каналу
+# Функція для маски каналу
 def get_channel_mask(x, z, channel_left, channel_right):
-    """Повертає маску, де True - точки, що належать каналу."""
     mask = np.zeros((len(x), len(z)), dtype=bool)
     for j in range(len(z)):
         x_left = channel_left[j]
@@ -116,25 +99,14 @@ def get_channel_mask(x, z, channel_left, channel_right):
         mask[:, j] = (x >= x_left) & (x <= x_right)
     return mask
 
-
 # Функція 5: Застосування граничних умов
 def apply_boundary_conditions(q, x, z, channel_left, channel_right):
     q_new = q.copy()
-    
-    # Визначаємо маску каналу
-    channel_mask = get_channel_mask(x, z, channel_left, channel_right)
-    
-    # Граничні умови для всієї області
-    q_new[:, -1] = config.q_top  # Верхня межа (поверхня)
-    q_new[:, 0] = q_new[:, 1]    # Нижня межа: ∂q/∂z = 0
-    q_new[0, :] = q_new[1, :]    # Ліва межа: ∂q/∂x = 0
-    q_new[-1, :] = q_new[-2, :]  # Права межа: ∂q/∂x = 0
-    
-    # Обнуляємо концентрацію в каналі (або фіксуємо на малому рівні)
-    q_new[channel_mask] = 0.0  # Або config.q_top, якщо потрібна мала концентрація
-    
+    q_new[:, -1] = config.q_top
+    q_new[:, 0] = q_new[:, 1]
+    q_new[0, :] = q_new[1, :]
+    q_new[-1, :] = q_new[-2, :]
     return q_new
-
 
 # Функція 6: Перевірка умов зупинки
 def check_stopping_condition(q, time):
@@ -149,36 +121,35 @@ def check_stopping_condition(q, time):
         print(f"Час: {time / (3600 * 24):.2f} днів, Мінімальна концентрація: {min_q:.4f} кг/м³")
     return False
 
-
 # Функція 7: Візуалізація з межами областей і збереженням
-def visualize_results_with_grid(X, Z, q, time, channel_left, channel_right, z, title="Концентрація забрудника"):
-    plt.figure(figsize=(8, 6))
+def visualize_results_with_grid(X, Z, q, time, channel_left, channel_right, z, title="Концентрація забрудника", save=True):
+    plt.clf()  # Очищаємо попередній графік
     plt.contourf(X.T, Z.T, q, levels=50, cmap='jet', alpha=0.8)
     plt.colorbar(label='Концентрація (кг/м³)')
-
-    # Межі каналу
     plt.plot(channel_left, z, 'r--', linewidth=1.5, label='Межі каналу')
     plt.plot(channel_right, z, 'r--', linewidth=1.5)
-
     plt.title(f'{title} через {time / (3600 * 24):.2f} днів')
     plt.xlabel('x (м)')
     plt.ylabel('z (м)')
     plt.legend()
     plt.gca().set_aspect('equal', adjustable='box')
-
-    plt.savefig(f"results/concentration_{time / (3600 * 24):.2f}_days.png", dpi=300, bbox_inches='tight')
-    plt.show()
-
+    
+    if save:
+        plt.savefig(f"results/concentration_{time / (3600 * 24):.2f}_days.png", dpi=300, bbox_inches='tight')
+    
+    plt.draw()  # Оновлюємо графік
+    plt.pause(0.001)  # Коротка пауза для відображення
 
 # Основна функція моделювання
 def run_simulation():
     x, z, X, Z = initialize_grid()
     q, v_z, channel_left, channel_right = initialize_conditions(x, z)
     
-    snapshot_times = [1 * 24 * 3600, 10 * 24 * 3600]
+    snapshot_times = [1 * 24 * 3600, 10 * 24 * 3600]  # Час для збереження знімків
     snapshots_taken = {t: False for t in snapshot_times}
     
     time = 0
+    visualization_interval = 5000  # Оновлювати візуалізацію кожні 50 секунд
     
     while time < config.max_time:
         q_new = update_concentration(q, v_z, x, z, channel_left, channel_right)
@@ -186,15 +157,23 @@ def run_simulation():
         q = q_new
         time += config.dt
         
+        # Періодичне оновлення візуалізації
+        if time % visualization_interval < config.dt:
+            visualize_results_with_grid(X, Z, q, time, channel_left, channel_right, z, save=False)
+        
+        # Збереження знімків у потрібні моменти
         for snapshot_time in snapshot_times:
             if not snapshots_taken[snapshot_time] and abs(time - snapshot_time) < config.dt:
-                visualize_results_with_grid(X, Z, q, time, channel_left, channel_right, z)
+                visualize_results_with_grid(X, Z, q, time, channel_left, channel_right, z, save=True)
                 snapshots_taken[snapshot_time] = True
         
         if check_stopping_condition(q, time):
             break
     
-    visualize_results_with_grid(X, Z, q, time, channel_left, channel_right, z, title="Концентрація забрудника (кінцевий результат)")
+    # Фінальна візуалізація
+    visualize_results_with_grid(X, Z, q, time, channel_left, channel_right, z, title="Концентрація забрудника (кінцевий результат)", save=True)
+    plt.ioff()  # Вимикаємо інтерактивний режим
+    plt.show()  # Показуємо фінальний графік
 
 if __name__ == "__main__":
     run_simulation()
