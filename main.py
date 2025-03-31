@@ -54,23 +54,20 @@ def visualize_results_with_grid(X, Z, q, time, channel_left, channel_right, z, t
 
 # Перевірка умови зупинки
 def check_stopping_condition(q, time):
-    # Перевіряємо, чи вся концентрація перевищує поріг 0.004 кг/м³ (4000 мг/кг)
     if np.all(q >= config.q_threshold):
         print(f"Увесь зразок забруднений (> {config.q_threshold} кг/м³) через {time / (3600 * 24):.2f} днів")
         return True
     return False
 
 # Обчислення нового розподілу концентрації (лише дифузія)
-def compute_diffusion(q, soil_mask):
+def compute_diffusion(q, soil_mask, channel_mask):
     q_new = q.copy()
     
-    # Коефіцієнт дифузії та розміри кроку
     D = config.D
     dx2 = config.dx**2
     dz2 = config.dz**2
     dt = config.dt
     
-    # Стабільність (умова КФЛ для дифузії: D * dt / dx^2 <= 0.5)
     alpha_x = D * dt / dx2
     alpha_z = D * dt / dz2
     if max(alpha_x, alpha_z) > 0.5:
@@ -80,16 +77,40 @@ def compute_diffusion(q, soil_mask):
     for i in range(1, config.nx - 1):
         for j in range(1, config.nz - 1):
             if soil_mask[i, j]:  # Обчислюємо тільки в землі
-                q_new[i, j] = q[i, j] + D * dt * (
-                    (q[i+1, j] - 2 * q[i, j] + q[i-1, j]) / dx2 +  # Дифузія по x
-                    (q[i, j+1] - 2 * q[i, j] + q[i, j-1]) / dz2     # Дифузія по z
-                )
+                # Перевіряємо сусідів для коректного обчислення дифузії
+                diff_x = 0
+                diff_z = 0
+                
+                # По осі x
+                if soil_mask[i+1, j]:  # Якщо правий сусід у землі
+                    diff_x += (q[i+1, j] - q[i, j]) / dx2
+                else:  # Якщо правий сусід у каналі (нульовий потік)
+                    diff_x += 0
+                if soil_mask[i-1, j]:  # Якщо лівий сусід у землі
+                    diff_x += (q[i-1, j] - q[i, j]) / dx2
+                else:  # Якщо лівий сусід у каналі
+                    diff_x += 0
+                
+                # По осі z
+                if soil_mask[i, j+1]:  # Якщо верхній сусід у землі
+                    diff_z += (q[i, j+1] - q[i, j]) / dz2
+                else:  # Якщо верхній сусід у каналі
+                    diff_z += 0
+                if soil_mask[i, j-1]:  # Якщо нижній сусід у землі
+                    diff_z += (q[i, j-1] - q[i, j]) / dz2
+                else:  # Якщо нижній сусід у каналі
+                    diff_z += 0
+                
+                q_new[i, j] = q[i, j] + D * dt * (diff_x + diff_z)
     
     # Граничні умови
     q_new[:, -1] = config.q_top  # Постійна концентрація на верхній межі
-    q_new[:, 0] = q_new[:, 1]    # Нейманова умова (нульовий потік) на нижній межі
+    q_new[:, 0] = q_new[:, 1]    # Нейманова умова на нижній межі
     q_new[0, :] = q_new[1, :]    # Нейманова умова на лівій межі
     q_new[-1, :] = q_new[-2, :]  # Нейманова умова на правій межі
+    
+    # Забезпечуємо, що канал залишається без змін (немає дифузії в каналі)
+    q_new[channel_mask] = q[channel_mask]
     
     return q_new
 
@@ -105,7 +126,7 @@ def run_simulation():
     visualization_interval = 5000
     
     while time < config.max_time:
-        q_new = compute_diffusion(q, soil_mask)
+        q_new = compute_diffusion(q, soil_mask, channel_mask)
         q = q_new
         time += config.dt
         
