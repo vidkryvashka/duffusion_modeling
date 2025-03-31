@@ -54,14 +54,13 @@ def visualize_results_with_grid(X, Z, q, time, channel_left, channel_right, z, t
 
 # Перевірка умови зупинки
 def check_stopping_condition(q, time):
-    # Перевіряємо, чи вся концентрація перевищує поріг 0.004 кг/м³ (4000 мг/кг)
     if np.all(q >= config.q_threshold):
         print(f"Увесь зразок забруднений (> {config.q_threshold} кг/м³) через {time / (3600 * 24):.2f} днів")
         return True
     return False
 
-# Обчислення нового розподілу концентрації (лише дифузія)
-def compute_diffusion(q, soil_mask):
+# Обчислення нового розподілу концентрації
+def compute_diffusion(q, soil_mask, channel_mask, time):
     q_new = q.copy()
     
     # Коефіцієнт дифузії та розміри кроку
@@ -76,10 +75,23 @@ def compute_diffusion(q, soil_mask):
     if max(alpha_x, alpha_z) > 0.5:
         raise ValueError("Часовий крок dt занадто великий для стабільності дифузії!")
     
-    # Дифузія в 2D за допомогою явної схеми
+    # Визначаємо глибину заповнення каналу
+    z = np.linspace(0, 6, config.nz)
+    z_max = 6.0
+    source_depth = 0.0
+    if time >= 1.0:
+        source_depth = min(abs(config.v_z_channel) * time, z_max)  # Глибина = |v_z| * t
+    
+    # Заповнюємо канал концентрацією q = 0.01 залежно від глибини
+    for i in range(config.nx):
+        for j in range(config.nz):
+            if channel_mask[i, j] and (z_max - z[j]) <= source_depth:
+                q_new[i, j] = 0.01  # Константа q = 0.01
+    
+    # Дифузія в ґрунті
     for i in range(1, config.nx - 1):
         for j in range(1, config.nz - 1):
-            if soil_mask[i, j]:  # Обчислюємо тільки в землі
+            if soil_mask[i, j]:
                 q_new[i, j] = q[i, j] + D * dt * (
                     (q[i+1, j] - 2 * q[i, j] + q[i-1, j]) / dx2 +  # Дифузія по x
                     (q[i, j+1] - 2 * q[i, j] + q[i, j-1]) / dz2     # Дифузія по z
@@ -105,7 +117,7 @@ def run_simulation():
     visualization_interval = 5000
     
     while time < config.max_time:
-        q_new = compute_diffusion(q, soil_mask)
+        q_new = compute_diffusion(q, soil_mask, channel_mask, time)  # Додаємо channel_mask і time
         q = q_new
         time += config.dt
         
