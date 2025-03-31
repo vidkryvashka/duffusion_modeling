@@ -59,58 +59,73 @@ def check_stopping_condition(q, time):
         return True
     return False
 
-# Обчислення нового розподілу концентрації (лише дифузія)
-def compute_diffusion(q, soil_mask, channel_mask):
+# Обчислення нового розподілу концентрації
+def compute_diffusion(q, soil_mask, channel_mask, time):
     q_new = q.copy()
     
+    # Коефіцієнт дифузії та розміри кроку
     D = config.D
     dx2 = config.dx**2
     dz2 = config.dz**2
     dt = config.dt
     
+    # Стабільність (умова КФЛ для дифузії: D * dt / dx^2 <= 0.5)
     alpha_x = D * dt / dx2
     alpha_z = D * dt / dz2
     if max(alpha_x, alpha_z) > 0.5:
         raise ValueError("Часовий крок dt занадто великий для стабільності дифузії!")
     
-    # Дифузія в 2D за допомогою явної схеми
+    # Визначаємо глибину заповнення каналу
+    z = np.linspace(0, 6, config.nz)
+    z_max = 6.0
+    v0 = abs(config.v_z_channel)  # 0.02 м/с
+    w0 = 0.2  # Базова ширина при z >= 3
+    
+    # Розрахунок source_depth з урахуванням ширини
+    source_depth = 0.0
+    if time >= 1.0:
+        t = time - 1.0  # Починаємо з 1 секунди
+        # Верхня частина (z від 6 до 3): постійна швидкість
+        if t * v0 <= 3.0:  # 3 м за 150 с при v0 = 0.02 м/с
+            source_depth = t * v0
+        else:
+            # Конічна частина (z від 3 до 0)
+            t_cone = t - 3.0 / v0  # Час у конічній частині
+            # Ширина: w(z) = 0.2 + 1.2667 * (3 - z)
+            # v(z) = v0 * w0 / w(z), інтегруємо аналітично
+            # dz/dt = -v0 * w0 / (0.2 + 1.2667 * (3 - z))
+            # Інтеграл: source_depth = 3 + решта від конусу
+            if t_cone > 0:
+                # Спрощуємо: чисельно наближаємо
+                z_remaining = 3.0
+                while t_cone > 0 and z_remaining > 0:
+                    w = 0.2 + 1.2667 * (3 - z_remaining)
+                    v_z = v0 * w0 / w
+                    dz = v_z * min(t_cone, dt)  # Невеликий крок для точності
+                    z_remaining -= dz
+                    t_cone -= min(t_cone, dt)
+                source_depth = 3.0 + (3.0 - z_remaining)
+    
+    # Заповнюємо канал концентрацією q = 0.01 залежно від глибини
+    for i in range(config.nx):
+        for j in range(config.nz):
+            if channel_mask[i, j] and (z_max - z[j]) <= source_depth:
+                q_new[i, j] = 0.01
+    
+    # Дифузія в ґрунті
     for i in range(1, config.nx - 1):
         for j in range(1, config.nz - 1):
-            if soil_mask[i, j]:  # Обчислюємо тільки в землі
-                # Перевіряємо сусідів для коректного обчислення дифузії
-                diff_x = 0
-                diff_z = 0
-                
-                # По осі x
-                if soil_mask[i+1, j]:  # Якщо правий сусід у землі
-                    diff_x += (q[i+1, j] - q[i, j]) / dx2
-                else:  # Якщо правий сусід у каналі (нульовий потік)
-                    diff_x += 0
-                if soil_mask[i-1, j]:  # Якщо лівий сусід у землі
-                    diff_x += (q[i-1, j] - q[i, j]) / dx2
-                else:  # Якщо лівий сусід у каналі
-                    diff_x += 0
-                
-                # По осі z
-                if soil_mask[i, j+1]:  # Якщо верхній сусід у землі
-                    diff_z += (q[i, j+1] - q[i, j]) / dz2
-                else:  # Якщо верхній сусід у каналі
-                    diff_z += 0
-                if soil_mask[i, j-1]:  # Якщо нижній сусід у землі
-                    diff_z += (q[i, j-1] - q[i, j]) / dz2
-                else:  # Якщо нижній сусід у каналі
-                    diff_z += 0
-                
-                q_new[i, j] = q[i, j] + D * dt * (diff_x + diff_z)
+            if soil_mask[i, j]:
+                q_new[i, j] = q[i, j] + D * dt * (
+                    (q[i+1, j] - 2 * q[i, j] + q[i-1, j]) / dx2 +  # Дифузія по x
+                    (q[i, j+1] - 2 * q[i, j] + q[i, j-1]) / dz2     # Дифузія по z
+                )
     
     # Граничні умови
-    q_new[:, -1] = config.q_top  # Постійна концентрація на верхній межі
-    q_new[:, 0] = q_new[:, 1]    # Нейманова умова на нижній межі
-    q_new[0, :] = q_new[1, :]    # Нейманова умова на лівій межі
-    q_new[-1, :] = q_new[-2, :]  # Нейманова умова на правій межі
-    
-    # Забезпечуємо, що канал залишається без змін (немає дифузії в каналі)
-    q_new[channel_mask] = q[channel_mask]
+    q_new[:, -1] = config.q_top
+    q_new[:, 0] = q_new[:, 1]
+    q_new[0, :] = q_new[1, :]
+    q_new[-1, :] = q_new[-2, :]
     
     return q_new
 
@@ -126,7 +141,7 @@ def run_simulation():
     visualization_interval = 5000
     
     while time < config.max_time:
-        q_new = compute_diffusion(q, soil_mask, channel_mask)
+        q_new = compute_diffusion(q, soil_mask, channel_mask, time)
         q = q_new
         time += config.dt
         
