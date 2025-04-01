@@ -36,7 +36,8 @@ def initialize_conditions(x, z):
 # Візуалізація з межами областей і збереженням
 def visualize_results_with_grid(X, Z, q, time, channel_left, channel_right, z, title="Концентрація забрудника", save=True):
     plt.clf()
-    plt.contourf(X.T, Z.T, q, levels=50, cmap='jet', alpha=0.8)
+    # Фіксуємо vmin=0 (нульова концентрація) і vmax=0.01 (максимальна концентрація з граничних умов)
+    plt.contourf(X.T, Z.T, q, levels=50, cmap='jet', alpha=0.8, vmin=0, vmax=0.01)
     plt.colorbar(label='Концентрація (кг/м³)')
     plt.plot(channel_left, z, 'r--', linewidth=1.5, label='Межі каналу')
     plt.plot(channel_right, z, 'r--', linewidth=1.5)
@@ -145,18 +146,23 @@ def run_simulation():
         q = q_new
         time += config.dt
         
+        # Перевірка умови зупинки перед проміжною візуалізацією
+        if check_stopping_condition(q, time):
+            # Зберігаємо кінцевий результат одразу після виконання умови
+            visualize_results_with_grid(X, Z, q, time, channel_left, channel_right, z, 
+                                      title="Концентрація забрудника (кінцевий результат)", save=True)
+            break
+        
+        # Проміжна візуалізація
         if time % visualization_interval < config.dt:
             visualize_results_with_grid(X, Z, q, time, channel_left, channel_right, z, save=False)
         
+        # Знімки у визначені моменти
         for snapshot_time in snapshot_times:
             if not snapshots_taken[snapshot_time] and abs(time - snapshot_time) < config.dt:
                 visualize_results_with_grid(X, Z, q, time, channel_left, channel_right, z, save=True)
                 snapshots_taken[snapshot_time] = True
-        
-        if check_stopping_condition(q, time):
-            break
     
-    visualize_results_with_grid(X, Z, q, time, channel_left, channel_right, z, title="Концентрація забрудника (кінцевий результат)", save=True)
     plt.ioff()
     plt.show()
 
